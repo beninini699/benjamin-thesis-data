@@ -1,0 +1,2076 @@
+---
+title: "ba_thesis_marking_down_3_130825"
+author: "benjamin kos"
+output:
+  pdf_document: default 
+  html_document: default
+  word_document: default
+date: "2025 = 07-23"
+---
+
+```{r setup, include=FALSE}
+# Increase resolution
+# Clear workspace & set knitr options
+rm(list = ls())
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE, 
+  dpi = 300,                
+  fig.width = 6,            # Width  inches
+  fig.height = 4,           # Height inches
+  dev = "png",   
+  out.width = "100%"  
+)
+``` 
+1. Install & Load Packages
+
+```{r packages}
+needed <- c(
+  "qualtRics","tidyverse","lme4","lmerTest",
+  "emmeans","gridExtra","knitr","stringr","MuMin","car", "corrplot", "dplyr", "mice","kableExtra","Cairo"
+)
+new_pkgs <- needed[!(needed %in% installed.packages()[,"Package"])]
+if(length(new_pkgs)) install.packages(new_pkgs)
+
+library(qualtRics)   # read_survey()
+library(tidyverse)   # dplyr, tidyr, ggplot2, etc.
+library(lme4)        # lmer()
+library(lmerTest)    # Satterthwaite p‐values
+library(emmeans)     # estimated marginal means
+library(gridExtra)   # arrange multiple plots
+library(knitr)       # kable()
+library(stringr)     # str_trim()
+library(MuMIn) 
+library(car)        # for vif()
+library(corrplot)
+library(dplyr)
+library(mice)
+library(kableExtra)
+library(Cairo)
+
+``` 
+
+# 2. Load & Clean Data
+
+```{r load-clean}
+## 2.1 Import cleaned Qualtrics export
+raw_data <- read_survey(
+  "cleaned for_analysis_clean_2207_1915_survey anchoring_cba_benjamin.csv"
+)
+
+## 2.2 Trim any stray spaces (including non‐breaking) in column names
+colnames(raw_data) <- str_trim(colnames(raw_data))
+
+## 2.3 Recode demographics
+country_codes <- c(
+  "10"  = "Austria",        "17"  = "Belgium",
+  "45"  = "Czech Republic", "61"  = "France",
+  "65"  = "Germany",        "84"  = "Italy",
+  "122" = "Netherlands",    "137" = "Poland",
+  "157" = "Slovakia",       "184" = "UAE",
+  "185" = "UK",             "187" = "USA"
+)
+
+raw_data <- raw_data %>%
+  mutate(
+    dem_gender = factor(dem_gender, levels = c(0,1),
+                        labels = c("Male","Female")),
+    # direct indexing into the named vector:
+    dem_residence = country_codes[ as.character(dem_residence) ],
+    dem_enrolled_grad = factor(dem_enrolled_grad, levels = c(0,1),
+                               labels = c("No","Yes")),
+    dem_ed_status = factor(
+      dem_ed_status,
+      levels = c(5, 1, 2, 3, 4),               # raw codes: other is 0
+      labels = c(
+        "Other",
+        "Bachelor (current)",
+        "Bachelor's Degree",
+        "Master (current)",
+        "Master's Degree"
+      ),
+      ordered = TRUE
+    ),
+    dem_study = factor(dem_study, levels = 1:2,
+                       labels = c("Econ/Business","Other")),
+    dem_job_status = factor(dem_job_status, levels = 1:4,
+      labels = c("Employed","Maternity leave","Job seeking","Study")),
+    dem_attitude_drive = factor(dem_attitude_drive, levels = 1:7,
+      labels = c(
+        "Strongly disagree","Disagree","Somewhat disagree",
+        "Neither agree nor disagree","Somewhat agree","Agree","Strongly agree"
+      )),
+    dem_attitude_negskills = factor(dem_attitude_negskills, levels = 1:7,
+      labels = c(
+        "Strongly disagree","Disagree","Somewhat disagree",
+        "Neither agree nor disagree","Somewhat agree","Agree","Strongly agree"
+      )), 
+    # invert GPA in place (1→5, 5→1) for regression
+    dem_gpa_orig = dem_gpa_2,
+    dem_gpa_2 = 5 - dem_gpa_2 #gpa inverted 
+    
+
+  )
+
+summary(raw_data$dem_gpa_2) #check if transformation worked 
+summary(raw_data$dem_gpa_orig)
+```
+
+```{r pivot-data_long, message=FALSE}
+
+## 2.4 Pivot to long form
+
+data_long <- raw_data %>%
+  pivot_longer(
+    cols          = starts_with("T"),
+    names_to      = c("treatment","measure"),
+    names_pattern = "T(\\d+)_(.*)",
+    values_to     = "value"
+  ) %>%
+  pivot_wider(
+    names_from  = measure,
+    values_from = value
+  ) %>%
+  mutate(
+    treatment      = factor(
+                       treatment,
+                       levels = c("1","2","3"),
+                       labels = c("NoInfo","MinSalary","RangeSalary")
+                     ),
+    drive_num      = as.integer(dem_attitude_drive),
+    negskills_num  = as.integer(dem_attitude_negskills),
+    ed_status_num  = as.integer(dem_ed_status)
+  )
+
+# Sanity checks
+length(unique(raw_data$ResponseId))       # should be 97
+table(table(data_long$ResponseId))        # should show 3 rows per ID
+glimpse(raw_data)
+glimpse(data_long)
+
+```
+
+# 3. Demographic Overview
+
+## 3.1 Single‑choice Categoricals
+
+```{r demog-cat}
+print_cat <- function(var) {
+  raw_data %>%
+    count({{var}}, name="n") %>%
+    mutate(pct = n / sum(n) * 100) %>%
+    kable(digits=1)
+}
+
+cat("### Gender\n");                    print_cat(dem_gender)
+cat("### Residence\n");                 print_cat(dem_residence)
+cat("### Enrolled in Graduate Program\n"); print_cat(dem_enrolled_grad)
+cat("### Education Status\n");          print_cat(dem_ed_status)
+cat("### Field of Study\n");            print_cat(dem_study)
+cat("### Job Status\n");                print_cat(dem_job_status)
+```
+
+## 3.2 Multi‑select Info Sources
+
+
+```{r demog-multi, message=FALSE}
+## 3.2 Multi‑select Info Sources
+#Respondents could select any combination of codes (e.g. `148` means they clicked 1, 4, and 8).
+#Code untangles them and counts clicks 
+
+# 1) Code → label mapping
+infos_map <- tibble(
+  code  = as.character(1:9),
+  label = c(
+    "Family/Partner",
+    "Acquaintances",
+    "Chamber of labor",
+    "Trade Union",
+    "Public Employment Service (AMS)",
+    "Collective agreements",
+    "Job Advertisements",
+    "Online Job Portals",
+    "Other (see text)"
+  )
+)
+
+# 2) Expand each digit into its own row, ignoring NA
+infos_counts <- raw_data %>%
+  filter(!is.na(dem_infosources)) %>%  
+  mutate(
+    codes = strsplit(as.character(dem_infosources), "")  # split into single chars
+  ) %>%
+  unnest(codes) %>%  
+  filter(codes %in% infos_map$code) %>%  # keep only 1–9
+  left_join(infos_map, by = c("codes" = "code")) %>%
+  count(label, name = "clicks") %>%
+  arrange(desc(clicks))
+
+# 3) Display of click frequencies
+kable(infos_counts, digits = 0, caption = "Total Clicks per Info Source")
+
+# 4) Extract free‑text “Other” (code 9) responses
+other_texts <- raw_data %>%
+  filter(!is.na(dem_infosources)) %>%
+  mutate(codes = strsplit(as.character(dem_infosources), "")) %>%
+  unnest(codes) %>%
+  filter(codes == "9", 
+         !is.na(dem_infosources_9_TEXT), 
+         dem_infosources_9_TEXT != "") %>%
+  distinct(dem_infosources_9_TEXT) %>%
+  pull()
+
+if(length(other_texts)) {
+  cat("\n**Other (free‑text) responses:**\n")
+  cat(paste0("- ", other_texts), sep = "\n")
+} else {
+  cat("\n_No free‑text “Other” responses._\n")
+}
+
+
+
+```
+
+## 3.3 Numeric Summaries
+
+```{r demog-num, echo=TRUE}
+library(dplyr)
+
+#1. Age (years)
+n_age <- sum(!is.na(raw_data$dem_age))
+cat("## Age (years)   (N =", n_age, ")\n\n")
+raw_data %>% 
+  summarise(
+    N      = n_age,
+    Mean   = mean(dem_age,    na.rm=TRUE),
+    Median = median(dem_age,  na.rm=TRUE),
+    SD     = sd(dem_age,      na.rm=TRUE),
+    IQR    = IQR(dem_age,     na.rm=TRUE),
+    Min    = min(dem_age,     na.rm=TRUE),
+    Max    = max(dem_age,     na.rm=TRUE)
+  ) %>% print()
+
+#2. Years living in Austria
+n_yrs_A <- sum(!is.na(raw_data$dem_livinginaustria))
+cat("\n## Years in Austria   (N =", n_yrs_A, ")\n\n")
+raw_data %>% 
+  summarise(
+    N      = n_yrs_A,
+    Mean   = mean(dem_livinginaustria, na.rm=TRUE),
+    Median = median(dem_livinginaustria, na.rm=TRUE),
+    SD     = sd(dem_livinginaustria,   na.rm=TRUE),
+    IQR    = IQR(dem_livinginaustria,  na.rm=TRUE),
+    Min    = min(dem_livinginaustria,  na.rm=TRUE),
+    Max    = max(dem_livinginaustria,  na.rm=TRUE)
+  ) %>% print()
+
+#3. GPA
+n_gpa <- sum(!is.na(raw_data$dem_gpa_orig))
+cat("\n## GPA (Austrian scale)   (N =", n_gpa, ")\n\n")
+raw_data %>% 
+  summarise(
+    N      = n_gpa,
+    Mean   = mean(dem_gpa_2, na.rm=TRUE),
+    Median = median(dem_gpa_2, na.rm=TRUE),
+    SD     = sd(dem_gpa_2,   na.rm=TRUE),
+    IQR    = IQR(dem_gpa_2,  na.rm=TRUE),
+    Min    = min(dem_gpa_2,  na.rm=TRUE),
+    Max    = max(dem_gpa_2,  na.rm=TRUE)
+  ) %>% print()
+
+#4. Overall Work Experience (years)
+n_xp_tot <- sum(!is.na(raw_data$dem_xp_overall))
+cat("\n## Overall Work Experience (years)   (N =", n_xp_tot, ")\n\n")
+raw_data %>% 
+  summarise(
+    N      = n_xp_tot,
+    Mean   = mean(dem_xp_overall, na.rm=TRUE),
+    Median = median(dem_xp_overall, na.rm=TRUE),
+    SD     = sd(dem_xp_overall,   na.rm=TRUE),
+    IQR    = IQR(dem_xp_overall,  na.rm=TRUE),
+    Min    = min(dem_xp_overall,  na.rm=TRUE),
+    Max    = max(dem_xp_overall,  na.rm=TRUE)
+  ) %>% print()
+
+#5. Relevant Work Experience (years)
+n_xp_rel <- sum(!is.na(raw_data$dem_xp_relevant))
+cat("\n## Relevant Work Experience (years)   (N =", n_xp_rel, ")\n\n")
+raw_data %>% 
+  summarise(
+    N       = n_xp_rel,
+    Mean    = mean(dem_xp_relevant, na.rm=TRUE),
+    Median  = median(dem_xp_relevant, na.rm=TRUE),
+    SD      = sd(dem_xp_relevant,   na.rm=TRUE),
+    IQR     = IQR(dem_xp_relevant,  na.rm=TRUE),
+    Min     = min(dem_xp_relevant,  na.rm=TRUE),
+    Max     = max(dem_xp_relevant,  na.rm=TRUE),
+    Missing = sum(is.na(dem_xp_relevant))
+  ) %>% print()
+
+```
+
+## 3.4 Attitude Scales
+
+These are 7‑point Likert items (1 = Strongly disagree … 7 = Strongly agree).
+
+### Drive
+
+```{r attitude-drive}
+raw_data %>%
+  count(dem_attitude_drive) %>%
+  mutate(
+    pct = n / sum(n) * 100,
+    Level = as.integer(dem_attitude_drive)
+  ) %>%
+  select(Level, dem_attitude_drive, n, pct) %>%
+  rename(
+    Response = dem_attitude_drive,
+    Count    = n,
+    Percent  = pct
+  ) %>%
+  kable(digits = c(0,0,0,1),
+        col.names = c("Level","Response","Count","Percent"),
+        caption = "Distribution of Attitude: Drive")
+
+```
+###Negotiation‑Skills Confidence
+```{r attitude-negotiation-skills}
+raw_data %>%
+  count(dem_attitude_negskills) %>%
+  mutate(
+    pct   = n / sum(n) * 100,
+    Level = as.integer(dem_attitude_negskills)
+  ) %>%
+  select(Level, dem_attitude_negskills, n, pct) %>%
+  rename(
+    Response = dem_attitude_negskills,
+    Count    = n,
+    Percent  = pct
+  ) %>%
+  kable(
+    digits = c(0,0,0,1),
+    col.names = c("Level","Negotiation Skills Confidence","Count","Percent"),
+    caption = "Distribution of ‘Negotiation‑Skills Confidence’"
+  )
+
+```
+###attitude summary 
+```{r attitude-summary}
+
+### Career Drive Scale
+
+drive <- as.integer(raw_data$dem_attitude_drive)
+
+data.frame(
+  N      = sum(!is.na(drive)),
+  Mean   = mean(drive,    na.rm = TRUE),
+  Median = median(drive,  na.rm = TRUE),
+  SD     = sd(drive,      na.rm = TRUE),
+  IQR    = IQR(drive,     na.rm = TRUE),
+  Min    = min(drive,     na.rm = TRUE),
+  Max    = max(drive,     na.rm = TRUE)
+)
+
+### Negotiation Confidence Scale
+
+neg <- as.integer(raw_data$dem_attitude_negskills)
+
+data.frame(
+  N      = sum(!is.na(neg)),
+  Mean   = mean(neg,    na.rm = TRUE),
+  Median = median(neg,  na.rm = TRUE),
+  SD     = sd(neg,      na.rm = TRUE),
+  IQR    = IQR(neg,     na.rm = TRUE),
+  Min    = min(neg,     na.rm = TRUE),
+  Max    = max(neg,     na.rm = TRUE)
+)
+
+```
+
+## 3.5 Significance Tests for Attitude Scales by Gender
+
+ t‐tests on the numeric codes for Drive and Negotiation‐Skills Confidence by gender (0=Male, 1=Female). 
+
+```{r attitude-t-tests-significance}
+
+# scales and labels
+scales <- c("dem_attitude_drive", "dem_attitude_negskills")
+scale_labels <- c("Drive", "Negotiation‑Skills Confidence")
+
+for(i in seq_along(scales)) {
+  var_name <- scales[i]
+  label    <- scale_labels[i]
+  
+  # Welch’s t-test
+  formula <- as.formula(paste0("as.integer(", var_name, ") ~ dem_gender"))
+  test_result <- t.test(formula, data = raw_data, var.equal = FALSE)
+  
+  p_val <- test_result$p.value
+  t_stat <- test_result$statistic
+  df_val <- test_result$parameter
+  
+  # Print summary line
+  cat(sprintf(
+    "%s: t = %.2f, df = %.1f, p = %.3f → %s\n",
+    label,
+    t_stat,
+    df_val,
+    p_val,
+    if (p_val < 0.05) "**Significant gender difference**" else "No significant difference"
+  ))
+}
+
+```
+
+# 4. Boxplots: Estimate & Ask by Gender × Condition
+
+```{r boxplots, fig.width=8, fig.height=5}
+pog1 <- ggplot(data_long, aes(x=treatment, y=estimate, fill=dem_gender)) +
+  geom_boxplot(position=position_dodge(0.8)) +
+  scale_y_continuous(breaks=c(2500,5000,7500)) +
+  labs(title="Estimate (€)", x="", fill="Gender") +
+  theme_minimal()
+
+pog2 <- ggplot(data_long, aes(x=treatment, y=ask, fill=dem_gender)) +
+  geom_boxplot(position=position_dodge(0.8)) +
+  scale_y_continuous(breaks=c(2500,5000,7500)) +
+  labs(title="Ask (€)", x="", fill="Gender") +
+  theme_minimal()
+
+gridExtra::grid.arrange(pog1, pog2, ncol=2)
+
+```
+
+
+
+```{r boxplot-numeric-summary}
+
+if ("package:plyr" %in% search()) detach("package:plyr", unload = TRUE)
+
+
+get_box_stats <- function(data, var) {
+  data %>%
+    dplyr::group_by(treatment, dem_gender) %>%
+    dplyr::summarise(
+      n          = dplyr::n(),
+      Q1         = quantile({{var}}, 0.25, na.rm = TRUE),
+      Median     = median({{var}},  na.rm = TRUE),
+      Q3         = quantile({{var}}, 0.75, na.rm = TRUE),
+      IQR        = IQR({{var}},       na.rm = TRUE),
+      Lower      = boxplot.stats({{var}}, coef = 1.5)$stats[1],
+      Upper      = boxplot.stats({{var}}, coef = 1.5)$stats[5],
+      n_outliers = length(boxplot.stats({{var}}, coef = 1.5)$out),
+      .groups    = "drop"
+    )
+}
+
+# Numeric summary Estimate
+stats_est <- get_box_stats(data_long, estimate)
+kable(
+  stats_est,
+  caption = "Numeric Boxplot Summary: Estimate (€)",
+  digits  = 0
+)
+
+#Numeric summary for Ask (€) 
+stats_ask <- get_box_stats(data_long, ask)
+kable(
+  stats_ask,
+  caption = "Numeric Boxplot Summary: Ask (€)",
+  digits  = 0
+)
+
+
+```
+
+```{r,boxolot global estimate vs ask}
+
+plot_data <- data_long %>%
+  select(treatment, estimate, ask) %>%
+  tidyr::pivot_longer(cols = c("estimate", "ask"),
+                      names_to = "variable",
+                      values_to = "value")
+
+# Calculate medians for labels
+median_labels <- plot_data %>%
+  group_by(treatment, variable) %>%
+  summarise(median_value = median(value, na.rm = TRUE), .groups = "drop")
+
+# Colors for reference lines
+line_min <- "#E69F00"   # Soft orange (CBA minimum)
+line_range <- "#009E73" # Soft green (salary range lower/upper)
+
+# Combined plot
+p <- ggplot(plot_data, aes(x = treatment, y = value, fill = variable)) +
+  geom_boxplot(position = position_dodge(0.75), width = 0.65, alpha = 0.7) +
+  
+  # treatment reference lines
+  geom_hline(yintercept = 3069.98, linetype = "dashed", color = line_min, alpha = 0.4) +
+  geom_hline(yintercept = 3000, linetype = "dotted", color = line_range, alpha = 0.3) +
+  geom_hline(yintercept = 3900, linetype = "dotted", color = line_range, alpha = 0.3) +
+  
+  # median labels
+  geom_text(data = median_labels,
+            aes(x = treatment, y = median_value, label = round(median_value), group = variable),
+            position = position_dodge(width = 0.75),
+            vjust = -0.4, size = 3, color = "black") +
+  
+  scale_fill_manual(values = c("estimate" = "#56B4E9", "ask" = "#D55E00"),
+                    labels = c("Estimate", "Ask")) +
+  scale_y_continuous(breaks = seq(2500, 7500, 500)) +
+  labs(
+    title = "Salary Estimates and Asks Across Transparency Conditions",
+    x = "Treatment Condition",
+    y = "Salary (€)",
+    fill = "Variable"
+  ) +
+  theme_minimal(base_size = 12)
+print(p)
+```
+
+#boxplot global estimate vs ask plus means 
+```{r combined-boxplot, message=FALSE, warning=FALSE}
+
+plot_data <- data_long %>%
+  select(treatment, estimate, ask) %>%
+  pivot_longer(
+    cols = c("estimate", "ask"),
+    names_to = "variable",
+    values_to = "value"
+  )
+
+# 2. medians & means labels
+stat_labels <- plot_data %>%
+  group_by(treatment, variable) %>%
+  summarise(
+    median_value = median(value, na.rm = TRUE),
+    mean_value   = mean(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+line_min <- "#E69F00"   # CBA minimum
+line_range <- "#009E73" # Salary range lower/upper
+
+p7 <- ggplot(plot_data, aes(x = treatment, y = value, fill = variable)) +
+  geom_boxplot(position = position_dodge(0.75), width = 0.65, alpha = 0.7) +
+  
+  geom_hline(yintercept = 3069.98, linetype = "dashed", color = line_min, alpha = 0.4) +
+  geom_hline(yintercept = 3000, linetype = "dotted", color = line_range, alpha = 0.3) +
+  geom_hline(yintercept = 3900, linetype = "dotted", color = line_range, alpha = 0.3) +
+  
+  geom_text(data = stat_labels,
+            aes(x = treatment, y = median_value, label = paste0("Med: ", round(median_value)), group = variable),
+            position = position_dodge(width = 0.75),
+            vjust = -1.2, size = 3.2, color = "black") +
+  
+
+  geom_text(data = stat_labels,
+            aes(x = treatment, y = mean_value, label = paste0("Mean: ", round(mean_value)), group = variable),
+            position = position_dodge(width = 0.75),
+            vjust = 1.7, size = 3.2, color = "gray30") +
+  
+
+  scale_fill_manual(values = c("estimate" = "#56B4E9", "ask" = "#D55E00"),
+                    labels = c("Estimate", "Ask")) +
+  
+  #  y-axis scaling consistency
+  scale_y_continuous(breaks = c(2500, 5000, 7500)) +
+  
+  labs(
+    title = "Salary Estimates and Asks Across Transparency Conditions",
+    x = "Treatment",
+    y = "Salary (€)",
+    fill = "Variable"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p7)
+
+```
+
+# 5 Linear Mixed Models
+
+## 5.1 Baseline LMM for Estimate
+
+#We fit without controls:
+
+```{r baseline-lmm}
+library(lme4)
+library(lmerTest)
+
+# Baseline model
+m1 <- lmer(
+  estimate ~ dem_gender * treatment + (1 | ResponseId),
+  data = data_long
+)
+
+# Show the summary to verify p‐values are available
+summary(m1)
+
+# Compute R²
+r2_ask <- r.squaredGLMM(m1)
+cat("Marginal R² (fixed effects):",  round(r2_ask[1], 3), "\n")
+cat("Conditional R² (fixed + random):", round(r2_ask[2], 3), "\n")
+```
+##5.1.2 emmeans contrast estimate  baseline estimate 
+```{r, estimate baseline contrasts }
+# Estimate marginal means for baseline estimate without controls, just interaction 
+emm_estimate_treat_gender_baseline <- emmeans(m1, ~ treatment * dem_gender)
+summary(emm_estimate_treat_gender_baseline, infer = TRUE)
+```
+
+```{r}
+ # a) Treatment comparisons within each gender (3 pairwise per gender) tukey adjusted
+contr_treat_within_gender_estimate_baseline <- emmeans(m1, ~ treatment | dem_gender) %>%
+  contrast(method = "pairwise", adjust = "tukey")
+print(contr_treat_within_gender_estimate_baseline)
+```
+```{r}
+ # b) Gender differences within each treatment (3 pairwise comparisons) holm adjusted
+contr_gender_within_treatment_estimate_baseline <- emmeans(m1, ~ dem_gender | treatment) %>%
+  contrast(method = "pairwise", adjust = "holm")
+print(contr_gender_within_treatment_estimate_baseline)
+```
+```{r}
+# c) All pairwise interaction-cell comparisons (6 cells = 15 comparisons) p not adjusted
+contr_all_estimate_baseline <- contrast(emm_estimate_treat_gender_baseline,
+                                        method = "pairwise",
+                                        adjust = "none") #mvt
+print(contr_all_estimate_baseline)
+
+# Interaction plot
+emmip(m1, dem_gender ~ treatment, CIs = TRUE, ylab = "Estimate")
+```
+
+## 5.1.3 Diagnosing Potential Confounding
+```{r confound-diagnostics, message=FALSE}
+
+
+# 1. Correlation matrix 
+cont_controls <- data_long %>%
+  select(dem_age,
+         dem_xp_overall,
+         dem_xp_relevant,
+         dem_gpa_2,
+         ed_status_num,
+         drive_num,
+         negskills_num,
+         dem_livinginaustria) %>%
+  na.omit()
+
+corr_mat <- cor(cont_controls)
+corrplot(corr_mat, method="ellipse", tl.cex=0.8)
+
+
+```
+
+###5.1.4 lmm with primary covariables as specified in aspredicted
+```{r lmm-estimate-primary-controls}
+library(lme4)
+library(lmerTest)
+
+# Primary‐controls LMM
+m_primary <- lmer(
+  estimate ~ dem_gender * treatment
+             + dem_age
+             + dem_xp_overall
+             + dem_xp_relevant
+             + dem_gpa_2
+             + ed_status_num
+
+           + (1 | ResponseId),
+  data = data_long, 
+)
+
+summary(m_primary)
+
+r2 <- r.squaredGLMM(m_primary)
+cat("Marginal R² (fixed effects):",  round(r2[1],3), "\n")
+cat("Conditional R² (fixed + random):", round(r2[2],3), "\n\n")
+```
+```{r}
+
+```
+
+#5.1.5 Emmeans contrastsLMM primary "estimate" 
+```{r}
+# Estimated marginal means for treatment × gender on estimate
+emm_estimate_treat_gender <- emmeans(m_primary, ~ treatment * dem_gender)
+summary(emm_estimate_treat_gender, infer = TRUE)
+
+```
+
+```{r}
+#a) Treatment effects within gender
+contr_treat_within_gender_estimate <- emmeans(m_primary, ~ treatment | dem_gender) %>%
+  contrast(method = "pairwise", adjust = "tukey")
+
+print(contr_treat_within_gender_estimate)
+```
+
+```{r}
+#b)Gender differences within each treatment
+contr_gender_within_treatment_estimate <- emmeans(m_primary, ~ dem_gender | treatment) %>%
+  contrast(method = "pairwise", adjust = "holm")
+
+print(contr_gender_within_treatment_estimate)
+
+```
+```{r}
+# c) All pairwise interaction-cell comparisons (6 cells = 15 comparisons)
+emm_estimate_treat_gender <- emmeans(m_primary, ~ treatment * dem_gender)
+
+contr_all_estimate <- contrast(emm_estimate_treat_gender,
+                               method = "pairwise",
+                               adjust = "none")  # or(parking) "scheffe", "tukey", "mvt", "none"
+print(contr_all_estimate)
+
+# Interaction plot
+emmip(m_primary, dem_gender ~ treatment, CIs = TRUE, ylab = "Estimate")
+```
+
+
+
+
+
+## 5.2 Baseline LMM for “Ask”
+ model mirrors the previous one but uses ask as the dependent variable.
+```{r baseline-ask-lmm}
+library(lme4)
+library(lmerTest)
+
+# Baseline model for 'ask' (just interaction no controls)
+m1_ask <- lmer(
+  ask ~ dem_gender * treatment + (1 | ResponseId),
+  data = data_long
+)
+
+summary(m1_ask)
+
+r2_ask <- r.squaredGLMM(m1_ask)
+cat("Marginal R² (fixed effects):",  round(r2_ask[1], 3), "\n")
+cat("Conditional R² (fixed + random):", round(r2_ask[2], 3), "\n")
+
+```
+
+
+## 5.2.3. Primary Analysis for “Ask” with Selected Controls using all samples 
+
+```{r lmm-ask-primary-controls}
+library(lme4)
+library(lmerTest)
+library(MuMIn)
+
+# Primary‐controls LMM for 'ask'
+m_primary_ask <- lmer(
+  ask ~ dem_gender * treatment
+          + dem_age
+          + dem_xp_overall
+          + dem_xp_relevant
+          + dem_gpa_2
+          + ed_status_num
+        + (1 | ResponseId),
+  data = data_long
+)
+
+summary(m_primary_ask)
+
+# R²
+r2_ask <- r.squaredGLMM(m_primary_ask)
+cat("Marginal R² (fixed effects):",  round(r2_ask[1],3), "\n")
+cat("Conditional R² (fixed + random):", round(r2_ask[2],3), "\n")
+
+```
+
+
+## 5.2.4. Confounder Diagnostics for “Ask”
+```{r confound-diagnostics-ask, message=FALSE}
+
+
+# 1. Correlation matrix among numeric controls for ask model
+cont_controls_ask <- data_long %>%
+  select(
+    dem_age,
+    dem_xp_overall,
+    dem_xp_relevant,
+    dem_gpa_2,
+    ed_status_num
+  ) %>%
+  na.omit()
+
+corr_mat_ask <- cor(cont_controls_ask)
+corrplot(corr_mat_ask, method="ellipse", tl.cex=0.8, 
+         title="Correlations among Ask Controls", mar=c(0,0,1,0))
+
+
+
+```
+
+###5.1.6 fit diagnostic estimate/ ask primary
+
+```{r}
+r_est <- resid(m_primary, type="pearson");      f_est <- fitted(m_primary)
+r_ask <- resid(m_primary_ask, type="pearson");  f_ask <- fitted(m_primary_ask)
+
+yl  <- max(abs(c(r_est, r_ask)), na.rm=TRUE)
+xlf <- range(c(f_est, f_ask), finite=TRUE)
+
+qq_est <- qqnorm(r_est, plot=FALSE); qq_ask <- qqnorm(r_ask, plot=FALSE)
+xlq <- range(c(qq_est$x, qq_ask$x), finite=TRUE)
+ylq <- range(c(qq_est$y, qq_ask$y), finite=TRUE)
+
+## Diagnostics for m_primary (estimate DV)
+par(mfrow=c(1,2))
+plot(qq_est$x, qq_est$y, xlim=xlq, ylim=ylq,
+     xlab="Theoretical quantiles", ylab="Sample quantiles",
+     main="QQ: m_primary"); abline(lm(qq_est$y~qq_est$x), col="red")
+plot(f_est, r_est, xlim=xlf, ylim=c(-yl,yl),
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="Residuals vs Fitted: m_primary"); abline(h=0, lty=2, col="gray")
+
+## Diagnostics for m_primary_ask (ask DV)
+par(mfrow=c(1,2))
+plot(qq_ask$x, qq_ask$y, xlim=xlq, ylim=ylq,
+     xlab="Theoretical quantiles", ylab="Sample quantiles",
+     main="QQ: m_primary_ask"); abline(lm(qq_ask$y~qq_ask$x), col="red")
+plot(f_ask, r_ask, xlim=xlf, ylim=c(-yl,yl),
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="Residuals vs Fitted: m_primary_ask"); abline(h=0, lty=2, col="gray")
+
+par(mfrow=c(1,1))
+
+
+```
+#6. Mann-Whitney U test: Gender Gap within Each Treatment (Non‑Parametric)
+
+Mann–Whitney U test to compare men vs. women within each anchor condition, first Estimate, then on.  
+```{r gender-gap-mwu, message=FALSE}
+
+
+#  medians + MWU 
+run_gap <- function(df, dv) {
+  medians <- df %>%
+    group_by(treatment, dem_gender) %>%
+    dplyr::summarise(
+      median_val = median(.data[[dv]], na.rm = TRUE),
+      .groups    = "drop"
+    ) %>%
+    pivot_wider(
+      names_from  = dem_gender,
+      values_from = median_val
+    ) %>%
+    mutate(
+      gap_abs = Female - Male,
+      gap_pct = (Female - Male) / Male * 100
+    )
+  
+  tests <- df %>%
+    group_split(treatment) %>%
+    set_names(map_chr(., ~ unique(.x$treatment))) %>%
+    map_dfr(~ {
+      test <- wilcox.test(
+        .x[[dv]] ~ .x$dem_gender,
+        exact   = TRUE,
+        correct = FALSE
+      )
+      tibble(
+        treatment = unique(.x$treatment),
+        p_value   = test$p.value
+      )
+    })
+  
+  left_join(medians, tests, by = "treatment") %>%
+    select(treatment, Male, Female, gap_abs, gap_pct, p_value)
+}
+
+# 1) Estimate
+gap_estimate <- run_gap(data_long, "estimate")
+cat("### 4.x.1 Gender Gap in **Estimate** by Treatment\n\n")
+kable(
+  gap_estimate,
+  caption   = "Median Gender Gap on **Estimate**",
+  digits    = c(0,0,0,0,1,3),
+  col.names = c(
+    "Treatment",
+    "Median (Men, €)",
+    "Median (Women, €)",
+    "Gap (€)",
+    "Gap (%)",
+    "p‑value"
+  )
+)
+
+# 2) Ask
+gap_ask <- run_gap(data_long, "ask")
+cat("\n\n### 4.x.2 Gender Gap in **Ask** by Treatment\n\n")
+kable(
+  gap_ask,
+  caption   = "Median Gender Gap on **Ask**",
+  digits    = c(0,0,0,0,1,3),
+  col.names = c(
+    "Treatment",
+    "Median (Men, €)",
+    "Median (Women, €)",
+    "Gap (€)",
+    "Gap (%)",
+    "p‑value"
+  )
+)
+
+
+```
+#7. test whether each anchor produces a significant shift within the same person, using the paired Wilcoxon signed‑rank test. 
+1. T2 − T1(MinSalary vs NoInfo)  
+2. T3 − T1 (RangeSalary vs NoInfo)  
+
+```{r paired-wilcoxon, message=FALSE}
+library(dplyr)
+library(knitr)
+
+# run paired Wilcoxon on wide data
+run_paired_wide <- function(df, dv_prefix) {
+  x1 <- df[[paste0("T1_", dv_prefix)]]
+  x2 <- df[[paste0("T2_", dv_prefix)]]
+  x3 <- df[[paste0("T3_", dv_prefix)]]
+  
+  # Median baseline and differences
+  med1    <- median(x1, na.rm=TRUE)
+  med12   <- median(x2 - x1, na.rm=TRUE)
+  med13   <- median(x3 - x1, na.rm=TRUE)
+  pct12   <- med12 / med1 * 100
+  pct13   <- med13 / med1 * 100
+  
+  # Paired Wilcoxon tests
+  w12 <- wilcox.test(x2, x1, paired=TRUE, exact=TRUE, correct=FALSE)
+  w13 <- wilcox.test(x3, x1, paired=TRUE, exact=TRUE, correct=FALSE)
+  
+  tibble(
+    Comparison    = c("MinSalary vs NoInfo", "RangeSalary vs NoInfo"),
+    MedianChange  = c(med12, med13),
+    PercentChange = c(pct12, pct13),
+    p_value       = c(w12$p.value, w13$p.value)
+  )
+}
+
+# 7.a Estimates
+res_estimate <- run_paired_wide(raw_data, "estimate")
+cat("### Paired Wilcoxon for **Estimate**\n")
+kable(
+  res_estimate,
+  digits    = c(0,0,1,3),
+  col.names = c("Comparison", "Median Δ (€)", "Δ (%)", "p‑value"),
+  caption   = "Within‑subject shifts in **Estimate**"
+)
+
+#7.b Asks
+res_ask <- run_paired_wide(raw_data, "ask")
+cat("\n\n### Paired Wilcoxon for **Ask**\n")
+kable(
+  res_ask,
+  digits    = c(0,0,1,3),
+  col.names = c("Comparison", "Median Δ (€)", "Δ (%)", "p‑value"),
+  caption   = "Within‑subject shifts in **Ask**"
+)
+
+
+
+```
+
+```{r paired-wilcoxon, message=FALSE}
+library(dplyr)
+library(knitr)
+
+# run paired Wilcoxon on wide data
+run_paired_wide <- function(df, dv_prefix) {
+  x1 <- df[[paste0("T1_", dv_prefix)]]
+  x2 <- df[[paste0("T2_", dv_prefix)]]
+  x3 <- df[[paste0("T3_", dv_prefix)]]
+  
+  # Median baseline and differences
+  med1    <- median(x1, na.rm=TRUE)
+  med2    <- median(x2, na.rm=TRUE)
+  med3    <- median(x3, na.rm=TRUE)
+  med12   <- median(x2 - x1, na.rm=TRUE)
+  med13   <- median(x3 - x1, na.rm=TRUE)
+  pct12   <- med12 / med1 * 100
+  pct13   <- med13 / med1 * 100
+  
+  # Paired Wilcoxon tests
+  w12 <- wilcox.test(x2, x1, paired=TRUE, exact=TRUE, correct=FALSE)
+  w13 <- wilcox.test(x3, x1, paired=TRUE, exact=TRUE, correct=FALSE)
+  
+  tibble(
+    Comparison    = c("MinSalary vs NoInfo", "RangeSalary vs NoInfo"),
+    Median_T1     = c(med1, med1),
+    Median_Tx     = c(med2, med3),
+    MedianChange  = c(med12, med13),
+    PercentChange = c(pct12, pct13),
+    p_value       = c(w12$p.value, w13$p.value)
+  )
+}
+
+# 7.a Estimates
+res_estimate <- run_paired_wide(raw_data, "estimate")
+cat("### Paired Wilcoxon for **Estimate**\n")
+kable(
+  res_estimate,
+  digits    = c(0,0,0,0,1,3),
+  col.names = c("Comparison", "Median T1 (€)", "Median Tx (€)", "Median Δ (€)", "Δ (%)", "p‑value"),
+  caption   = "Within‑subject shifts in **Estimate**"
+)
+
+# 7.b Asks
+res_ask <- run_paired_wide(raw_data, "ask")
+cat("\n\n### Paired Wilcoxon for **Ask**\n")
+kable(
+  res_ask,
+  digits    = c(0,0,0,0,1,3),
+  col.names = c("Comparison", "Median T1 (€)", "Median Tx (€)", "Median Δ (€)", "Δ (%)", "p‑value"),
+  caption   = "Within‑subject shifts in **Ask**"
+)
+
+```
+
+# 8. Assertiveness Test: Markup Ratios by Gender
+
+```{r markup-gender-mwu, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(knitr)
+
+# dro zero or NA estimates
+markup_df <- raw_data %>%
+  filter(
+    !is.na(T1_estimate), T1_estimate != 0,
+    !is.na(T2_estimate), T2_estimate != 0,
+    !is.na(T3_estimate), T3_estimate != 0
+  ) %>%
+  transmute(
+    ResponseId,
+    dem_gender,
+    markup_T1 = T1_ask       / T1_estimate,
+    markup_T2 = T2_ask       / T2_estimate,
+    markup_T3 = T3_ask       / T3_estimate
+  ) %>%
+  pivot_longer(
+    cols         = starts_with("markup_"),
+    names_to     = "treatment",
+    names_prefix = "markup_",
+    values_to    = "markup"
+  )
+
+# MWU per treatment
+run_markup_mwu <- function(df, treat) {
+  d <- df %>% filter(treatment == treat)
+  
+  # Medians by gender
+  med_tab <- d %>%
+    group_by(dem_gender) %>%
+    dplyr::summarise(
+      med = median(markup, na.rm=TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(names_from = dem_gender, values_from = med) %>%
+    rename(Male = Male, Female = Female) %>%
+    mutate(
+      gap_pct = (Male - Female) / Female * 100
+    )
+  
+  # Mann–Whitney U test
+  test <- wilcox.test(markup ~ dem_gender, data = d, exact=TRUE, correct=FALSE)
+  
+  med_tab %>%
+    mutate(
+      treatment = treat,
+      p_value   = test$p.value
+    ) %>%
+    select(treatment, Male, Female, gap_pct, p_value)
+}
+
+# 3. conditions: T1, T2, T3
+results <- map_dfr(c("T1","T2","T3"), ~ run_markup_mwu(markup_df, .x))
+
+# good table 
+kable(
+  results,
+  digits    = c(0, 3, 3, 1, 3),
+  col.names = c("Treatment", "Median (Men)", "Median (Women)", "Gap (%)", "p‑value"),
+  caption   = "Gender Differences in Markup Ratios"
+)
+
+```
+
+
+
+
+
+
+#9b alternative control combination with only full 97 values 
+
+##estimate
+```{r lmm-complete-controls-estimate, message=FALSE, warning=FALSE}
+
+
+m_est_complete <- lmer(
+  estimate ~ dem_gender * treatment
+             + dem_age
+             + dem_xp_overall
+             + ed_status_num
+             + drive_num
+             + negskills_num
+           + (1 | ResponseId),
+  data = data_long
+)
+
+summary(m_est_complete)
+# Compute R² for the estimate model
+r2_est <- r.squaredGLMM(m_est_complete)
+cat(
+  "Estimate model R²:\n",
+  "  Marginal (fixed only): ", round(r2_est[1], 3), "\n",
+  "  Conditional (fixed + random): ", round(r2_est[2], 3), "\n"
+)
+
+vif(m_est_complete)
+```
+
+##ask 
+
+```{r lmm-complete-controls-ask, message=FALSE, warning=FALSE}
+m_ask_complete <- lmer(
+  ask ~ dem_gender * treatment
+         + dem_age
+         + dem_xp_overall
+         + ed_status_num
+         + drive_num
+             + negskills_num
+       + (1 | ResponseId),
+  data = data_long
+)
+
+summary(m_ask_complete)
+
+# Compute R² for the ask model
+r2_ask <- r.squaredGLMM(m_ask_complete)
+cat(
+  "Ask model R²:\n",
+  "  Marginal (fixed only): ", round(r2_ask[1], 3), "\n",
+  "  Conditional (fixed + random): ", round(r2_ask[2], 3), "\n"
+)
+
+vif(m_ask_complete)
+```
+model fit 
+```{r}
+qqnorm(resid(m_est_complete)); qqline(resid(m_est_complete))
+plot(fitted(m_est_complete), resid(m_est_complete))
+```
+
+
+
+#11 imputation approach to test how mad the missing gpa answers are with mice
+
+
+```{r mice-manual-loop, message=FALSE, warning=FALSE}
+
+if (!requireNamespace("parallelly", quietly=TRUE)) {
+  install.packages("parallelly")
+}
+if (!requireNamespace("broom.mixed", quietly=TRUE)) {
+  install.packages("broom.mixed")
+}
+
+# 1. Libraries 
+library(mice)          # multiple imputation
+library(lme4)          # lmer()
+library(lmerTest)      # Satterthwaite p‑values
+library(MuMIn)         # r.squaredGLMM()
+library(parallelly)    # dependency for broom.mixed
+library(broom.mixed)   # tidy() for lmer objects
+
+#2. Data prep 
+imp_vars <- data_long %>%
+  select(
+    ResponseId,    
+    estimate,     
+    dem_gender,    
+    treatment,     
+    dem_age,
+    dem_xp_overall,
+    dem_xp_relevant,
+    dem_gpa_2,     # this has NAs
+    ed_status_num
+  )
+
+# 2) Impute m=5 datasets via predictive‐mean matching 
+set.seed(2025)
+imp <- mice(
+  imp_vars,
+  m              = 5,
+  method         = "pmm",
+  predictorMatrix = make.predictorMatrix(imp_vars) %>%
+    # don’t use the ID or outcome to impute predictors:
+    { .[ , c("ResponseId","estimate")] <- 0; . },
+  maxit = 10
+)
+
+# 3)  formula 
+my_formula <- 
+  estimate ~ dem_gender * treatment +
+             dem_age +
+             dem_xp_overall +
+             dem_xp_relevant +
+             dem_gpa_2 +
+             ed_status_num +
+             (1 | ResponseId)
+
+# 4)  fit the LMM on each completed dataset 
+fits <- vector("list", imp$m)
+for(i in seq_len(imp$m)) {
+  df_i <- complete(imp, i)
+  fits[[i]] <- lmer(
+    formula = my_formula,
+    data    = df_i,
+    REML    = FALSE
+  )
+}
+
+# 5) pool 
+fits_mira <- as.mira(fits)
+pooled    <- pool(fits_mira)
+print(summary(pooled))
+
+#6) Average my Marginal R² over the imputations (test)
+r2_vals <- sapply(fits, function(fit) r.squaredGLMM(fit)[1])
+cat("Avg Marginal R²:", round(mean(r2_vals), 3), "\n")
+```
+```{r mice-lmm-ask, message=FALSE, warning=FALSE}
+if (!requireNamespace("parallelly", quietly=TRUE)) install.packages("parallelly")
+if (!requireNamespace("broom.mixed", quietly=TRUE)) install.packages("broom.mixed")
+
+# Libraries 
+library(mice)
+library(lme4)
+library(MuMIn)
+library(broom.mixed)
+
+#  data: 
+imp_vars <- data_long %>%
+  select(
+    ResponseId,
+    ask,       
+    dem_gender,
+    treatment,
+    dem_age,
+    dem_xp_overall,
+    dem_xp_relevant,
+    dem_gpa_2,
+    ed_status_num
+  )
+
+# predictor
+pred <- make.predictorMatrix(imp_vars)
+pred[, c("ResponseId","ask")] <- 0    
+meth <- make.method(imp_vars)
+meth[c("ResponseId","ask")] <- ""     
+
+# 3) Run mice (m=5 imputations by default) 
+set.seed(2025)
+imp_ask <- mice(
+  imp_vars,
+  m               = 5,
+  method          = "pmm",
+  predictorMatrix = pred,
+  maxit           = 10
+)
+
+# 4) Defining  LMM formula for 'ask'
+ask_formula <- 
+  ask ~ dem_gender * treatment +
+        dem_age +
+        dem_xp_overall +
+        dem_xp_relevant +
+        dem_gpa_2 +
+        ed_status_num +
+        (1 | ResponseId)
+
+# 5)  pool  imputations 
+fits_ask <- vector("list", imp_ask$m)
+for(i in seq_len(imp_ask$m)) {
+  df_i <- complete(imp_ask, i)
+  fits_ask[[i]] <- lmer(
+    formula = ask_formula,
+    data    = df_i,
+    REML    = FALSE
+  )
+}
+mira_ask <- as.mira(fits_ask)
+pooled_ask <- pool(mira_ask)
+print(summary(pooled_ask))
+
+# 
+r2_ask <- sapply(fits_ask, function(f) r.squaredGLMM(f)[1])
+cat("Avg Marginal R² (ask):", round(mean(r2_ask), 3), "\n")
+```
+
+## of ask
+
+```{r}
+library(emmeans)
+
+# Mixed model for "ask"
+m_primary_ask <- lmer(
+  ask ~ dem_gender * treatment +
+    dem_age +
+    dem_xp_overall +
+    dem_xp_relevant +
+    dem_gpa_2 +
+    ed_status_num +
+    (1 | ResponseId),
+  data = data_long
+)
+
+summary(m_primary_ask)
+
+# R²
+r2_ask <- r.squaredGLMM(m_primary_ask)
+cat("Marginal R² (fixed effects) for ask:",  round(r2_ask[1],3), "\n")
+cat("Conditional R² (fixed + random) for ask:", round(r2_ask[2],3), "\n\n")
+
+# Estimated marginal means for treatment × gender on ask
+emm_ask_treat_gender <- emmeans(m_primary_ask, ~ treatment * dem_gender)
+summary(emm_ask_treat_gender, infer = TRUE)
+```
+
+```{r}
+# Contrasts
+# a) Treatment effects within each gender
+contr_treat_within_gender_ask <- emmeans(m_primary_ask, ~ treatment | dem_gender) %>%
+  contrast(method = "pairwise", adjust = "tukey") #
+print(contr_treat_within_gender_ask)
+```
+
+```{r}
+# b) Gender differences within each treatment
+contr_gender_within_treatment_ask <- emmeans(m_primary_ask, ~ dem_gender | treatment) %>%
+  contrast(method = "pairwise", adjust = "holm")
+print(contr_gender_within_treatment_ask)
+```
+
+```{r}
+# c) All pairwise interaction-cell comparisons (Tukey)
+contr_all_ask <- contrast(emm_ask_treat_gender, method = "pairwise", adjust = "none") #scheffe mvt 
+print(contr_all_ask)
+
+# Interaction plot
+emmip(m_primary_ask, dem_gender ~ treatment, CIs = TRUE, ylab = "Ask")
+
+```
+
+## emmeans on baseline ask
+```{r}
+# Estimated marginal means for treatment × gender on baseline ask
+emm_ask_treat_gender_baseline <- emmeans(m1_ask, ~ treatment * dem_gender)
+summary(emm_ask_treat_gender_baseline, infer = TRUE)
+```
+
+```{r}
+# a) Treatment effects within each gender
+contr_treat_within_gender_ask_baseline <- emmeans(m1_ask, ~ treatment | dem_gender) %>%
+  contrast(method = "pairwise", adjust = "tukey") #
+print(contr_treat_within_gender_ask_baseline)
+
+
+```
+
+```{r}
+# b) Gender differences within each treatment
+contr_gender_within_treatment_ask_baseline <- emmeans(m1_ask, ~ dem_gender | treatment) %>%
+  contrast(method = "pairwise", adjust = "holm")
+print(contr_gender_within_treatment_ask_baseline)
+```
+
+```{r}
+# c) All pairwise interaction-cell comparisons 
+contr_all_ask_baseline <- contrast(emm_ask_treat_gender_baseline, 
+                                   method = "pairwise", adjust = "none")  #scheffe or mvt or tukey
+print(contr_all_ask_baseline)
+
+# Interaction plot
+emmip(m1_ask, dem_gender ~ treatment, CIs = TRUE, ylab = "Ask")
+```
+
+
+#13 Test if ordinal numeric for education status  is applicable 
+
+## of expectations
+
+
+```{r}
+ library(lme4)
+# linear numeric version
+mod_lin <- lmer(estimate ~ dem_gender * treatment + dem_age + dem_xp_overall +
+                dem_xp_relevant + dem_gpa_2 + ed_status_num + (1 | ResponseId),
+                data = data_long, REML = FALSE)
+
+# factor version (drops linear spacing assumption)
+mod_fac <- lmer(estimate ~ dem_gender * treatment + dem_age + dem_xp_overall +
+                dem_xp_relevant + dem_gpa_2 + dem_ed_status + (1 | ResponseId),
+                data = data_long, REML = FALSE)
+
+anova(mod_lin, mod_fac)  # does allowing non-linear education improve fit?
+
+
+mod_quad <- lmer(estimate ~ dem_gender * treatment + dem_age + dem_xp_overall +
+                 dem_xp_relevant + dem_gpa_2 + ed_status_num + I(ed_status_num^2) +
+                 (1 | ResponseId),
+                 data = data_long, REML = FALSE)
+
+anova(mod_lin, mod_quad)  # curvature check
+
+library(splines)
+# natural spline with 3 degrees of freedom
+mod_gpa_ns <- lmer(estimate ~ dem_gender * treatment + dem_age + dem_xp_overall +
+                   dem_xp_relevant + ns(dem_gpa_2, df = 3) + ed_status_num +
+                   (1 | ResponseId),
+                   data = data_long, REML = FALSE)
+
+anova(mod_lin, mod_gpa_ns)  # does a flexible GPA fit better?
+
+library(ggplot2)
+
+# GPA vs. outcome with smoothing (marginal relationship)
+ggplot(data_long, aes(x = dem_gpa_2, y = estimate)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(x = "GPA (inverted, higher=better)", y = "Estimate")
+
+# Education level effects (if treated as factor)
+ggplot(data_long, aes(x = dem_ed_status, y = estimate)) +
+  stat_summary(fun = mean, geom = "point") +
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.2)
+
+```
+
+
+
+
+# 14. results exploration 
+```{r}
+
+library(emmeans)
+
+# 1. Estimated marginal means for the interaction
+emm_treat_gender <- emmeans(m_primary, ~ treatment * dem_gender)
+
+# 2. Summary table with CIs and tests
+summary(emm_treat_gender, infer = TRUE)
+
+# 3. Pairwise contrasts
+#    a) Treatment effects within each gender
+contr_treat_within_gender <- emmeans(m_primary, ~ treatment | dem_gender) %>%
+  contrast(method = "pairwise", adjust = "bonferroni")
+print(contr_treat_within_gender)
+
+#    b) Gender differences within each treatment
+contr_gender_within_treatment <- emmeans(m_primary, ~ dem_gender | treatment) %>%
+  contrast(method = "pairwise", adjust = "bonferroni")
+print(contr_gender_within_treatment)
+
+#    c) All pairwise comparisons of the interaction cells (e.g., for global differences)
+contr_all <- contrast(emm_treat_gender, method = "pairwise", adjust = "tukey")
+print(contr_all)
+
+# 4. Interaction plot
+emmip(m_primary, dem_gender ~ treatment, CIs = TRUE)
+
+
+```
+#15 log test 
+#log_estimate 
+```{r lmm-logestimate-primary-controls est}
+library(lme4)
+library(lmerTest)
+
+# Primary‐controls LMM
+m_primary_log <- lmer(
+  log(estimate) ~ dem_gender * treatment
+             + dem_age
+             + dem_xp_overall
+             + dem_xp_relevant
+             + dem_gpa_2
+             + ed_status_num
+
+           + (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+summary(m_primary_log)
+
+r2 <- r.squaredGLMM(m_primary_log)
+cat("Marginal R² (fixed effects):",  round(r2[1],3), "\n")
+cat("Conditional R² (fixed + random):", round(r2[2],3), "\n\n")
+```
+#log_ask
+```{r lmm-logestimate-primary-controls ask}
+library(lme4)
+library(lmerTest)
+
+# Primary‐controls LMM
+m_primary_ask_log <- lmer(
+  log(ask) ~ dem_gender * treatment
+             + dem_age
+             + dem_xp_overall
+             + dem_xp_relevant
+             + dem_gpa_2
+             + ed_status_num
+
+           + (1 | ResponseId),
+  data = data_long,
+  REML=FALSE
+)
+
+summary(m_primary_ask_log)
+
+r2 <- r.squaredGLMM(m_primary_ask_log)
+cat("Marginal R² (fixed effects):",  round(r2[1],3), "\n")
+cat("Conditional R² (fixed + random):", round(r2[2],3), "\n\n")
+```
+interpret lmm logs 
+
+
+
+
+```{r , message=FALSE, warning=FALSE}
+
+m_primary_log <- lmer(
+  log(estimate) ~ dem_gender * treatment
+               + dem_age + dem_xp_overall + dem_xp_relevant + dem_gpa_2 + ed_status_num
+               + (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+# Get female vs male within each treatment on original scale
+emm <- emmeans(m_primary_log, ~ dem_gender | treatment, type = "response")
+gaps <- contrast(emm, method = "pairwise", adjust = "none")  # female vs male per treatment
+summary_gaps <- summary(gaps, infer = TRUE)
+
+# Inspect names to decide if it's ratio or estimate
+print(names(summary_gaps))
+
+# Build a tidy table with percent gaps
+gaps_df <- as.data.frame(summary_gaps) %>%
+  mutate(
+    percent_gap = if ("ratio" %in% colnames(.)) {
+      (ratio - 1) * 100
+    } else {
+      (exp(estimate) - 1) * 100
+    },
+    lower_pct = if ("ratio" %in% colnames(.)) {
+      (lower.CL - 1) * 100
+    } else {
+      (exp(lower.CL) - 1) * 100
+    },
+    upper_pct = if ("ratio" %in% colnames(.)) {
+      (upper.CL - 1) * 100
+    } else {
+      (exp(upper.CL) - 1) * 100
+    }
+  ) %>%
+  select(treatment, contrast, percent_gap, lower_pct, upper_pct, p.value)
+
+# Format for display
+gaps_df %>%
+  mutate(
+    Gap = sprintf("%.2f%%", percent_gap),
+    CI = sprintf("[%.2f%%, %.2f%%]", lower_pct, upper_pct),
+    p = sprintf("%.3f", p.value),
+    Significant = ifelse(p.value < 0.05, "yes", "no")
+  ) %>%
+  select(treatment, Gap, CI, p, Significant) %>%
+  kable(
+    caption = "Female vs Male percent gap in estimated salary by treatment with significance"
+  )
+
+```
+
+```{r,emmeans percent asklog}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(knitr)
+
+# 1. Fit log-ask model with interaction
+m_ask_log <- lmer(
+  log(ask) ~ dem_gender * treatment
+           + dem_age + dem_xp_overall + dem_xp_relevant + dem_gpa_2 + ed_status_num
+           + (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+# 2. Get female vs male within each treatment on original scale
+emm_ask <- emmeans(m_ask_log, ~ dem_gender | treatment, type = "response")
+gaps_ask <- contrast(emm_ask, method = "pairwise", adjust = "none")  # female vs male per treatment
+sg <- summary(gaps_ask, infer = TRUE)  # includes estimate, ratio or difference, CIs, p-values
+
+# 3. Convert to percent gap (handles whether emmeans returned ratio or log-difference)
+gaps_df <- as.data.frame(sg) %>%
+  mutate(
+    percent_gap = if ("ratio" %in% colnames(.)) {
+      (ratio - 1) * 100
+    } else {
+      (exp(estimate) - 1) * 100
+    },
+    lower_pct = if ("ratio" %in% colnames(.)) {
+      (lower.CL - 1) * 100
+    } else {
+      (exp(lower.CL) - 1) * 100
+    },
+    upper_pct = if ("ratio" %in% colnames(.)) {
+      (upper.CL - 1) * 100
+    } else {
+      (exp(upper.CL) - 1) * 100
+    },
+    significant = ifelse(p.value < 0.05, "yes", "no")
+  ) %>%
+  select(treatment, contrast, percent_gap, lower_pct, upper_pct, p.value, significant)
+
+# 4. Display nicely
+gaps_df %>%
+  mutate(
+    Gap = sprintf("%.2f%%", percent_gap),
+    CI = sprintf("[%.2f%%, %.2f%%]", lower_pct, upper_pct),
+    p = sprintf("%.3f", p.value)
+  ) %>%
+  select(treatment, Gap, CI, p, significant) %>%
+  kable(
+    caption = "Female vs Male percent gap in 'ask' by treatment (from log model); significance if p<.05"
+  )
+
+
+
+```
+
+```{r}
+
+# ensure reference levels
+data_long$dem_gender  <- relevel(as.factor(data_long$dem_gender),  ref = "Male")
+data_long$treatment   <- factor(data_long$treatment,
+                                levels = c("NoInfo", "MinSalary", "RangeSalary"))  # adjust if necessary
+
+# fit the percentage-friendly log model
+m_est_pct <- lmer(
+  log(ask) ~ dem_gender * treatment
+               + dem_age + dem_xp_overall + ed_status_num + drive_num + negskills_num
+               + (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+# female vs male within each treatment on original scale
+emm <- emmeans(m_est_pct, ~ dem_gender | treatment, type = "response")
+gaps <- contrast(emm, method = "pairwise", adjust = "none")  # Female vs Male per treatment
+sg <- summary(gaps, infer = TRUE)  # includes estimate/ratio, CIs, p-values
+
+# build percent gap table
+gaps_tbl <- as.data.frame(sg) %>%
+  mutate(
+    percent_gap = if ("ratio" %in% colnames(.)) {
+      (ratio - 1) * 100
+    } else {
+      (exp(estimate) - 1) * 100
+    },
+    lower_pct = if ("ratio" %in% colnames(.)) {
+      (lower.CL - 1) * 100
+    } else {
+      (exp(lower.CL) - 1) * 100
+    },
+    upper_pct = if ("ratio" %in% colnames(.)) {
+      (upper.CL - 1) * 100
+    } else {
+      (exp(upper.CL) - 1) * 100
+    },
+    significant = ifelse(p.value < 0.05, "yes", "no")
+  ) %>%
+  select(treatment, contrast, percent_gap, lower_pct, upper_pct, p.value, significant)
+
+# display nicely
+gaps_tbl %>%
+  mutate(
+    Gap = sprintf("%.2f%%", percent_gap),
+    CI  = sprintf("[%.2f%%, %.2f%%]", lower_pct, upper_pct),
+    p   = sprintf("%.3f", p.value)
+  ) %>%
+  select(treatment, Gap, CI, p, significant) %>%
+  kable(
+    caption = "Female vs Male percent gap in log(estimate) by treatment; significance indicates whether gap ≠ 0"
+  )
+
+
+
+```
+
+#fit check
+
+```{r, logged fit diagnostic}
+## Same-scale diagnostics for LOG models
+
+# Residuals & fitted (on log scale)
+r_estL <- resid(m_primary_log, type="pearson");      f_estL <- fitted(m_primary_log)
+r_askL <- resid(m_primary_ask_log, type="pearson");  f_askL <- fitted(m_primary_ask_log)
+
+# Shared limits
+yl  <- max(abs(c(r_estL, r_askL)), na.rm=TRUE)
+xlf <- range(c(f_estL, f_askL), finite=TRUE)
+
+# QQ data for shared axes
+qqE <- qqnorm(r_estL, plot=FALSE); qqA <- qqnorm(r_askL, plot=FALSE)
+xlq <- range(c(qqE$x, qqA$x), finite=TRUE); ylq <- range(c(qqE$y, qqA$y), finite=TRUE)
+
+## Diagnostics for m_primary_log (log-estimate DV)
+par(mfrow=c(1,2))
+plot(qqE$x, qqE$y, xlim=xlq, ylim=ylq,
+     xlab="Theoretical quantiles", ylab="Sample quantiles",
+     main="QQ: m_primary_log"); abline(lm(qqE$y~qqE$x), col="red")
+plot(f_estL, r_estL, xlim=xlf, ylim=c(-yl,yl),
+     xlab="Fitted values (log scale)", ylab="Pearson residuals",
+     main="Residuals vs Fitted: m_primary_log"); abline(h=0, lty=2, col="gray")
+
+## Diagnostics for m_primary_ask_log (log-ask DV)
+par(mfrow=c(1,2))
+plot(qqA$x, qqA$y, xlim=xlq, ylim=ylq,
+     xlab="Theoretical quantiles", ylab="Sample quantiles",
+     main="QQ: m_primary_ask_log"); abline(lm(qqA$y~qqA$x), col="red")
+plot(f_askL, r_askL, xlim=xlf, ylim=c(-yl,yl),
+     xlab="Fitted values (log scale)", ylab="Pearson residuals",
+     main="Residuals vs Fitted: m_primary_ask_log"); abline(h=0, lty=2, col="gray")
+
+par(mfrow=c(1,1))
+
+```
+
+#####################
+
+#exyploratory additional dvs 
+
+
+```{r}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+
+# Likert scale DVs to long format 
+likert_vars <- c("confidence", "fairness", "negotiability", 
+                 "reliability", "attractiveness", "qualified")
+
+data_likert <- raw_data %>%
+  pivot_longer(
+    cols = matches("^T[123]_(confidence|fairness|negotiability|reliability|attractiveness|qualified)$"),
+    names_to = c("treatment", "DV"),
+    names_pattern = "T(\\d+)_(.*)",
+    values_to = "score"
+  ) %>%
+  mutate(
+    treatment = factor(treatment, levels = c("1","2","3"),
+                       labels = c("NoInfo","MinSalary","RangeSalary")),
+    DV = factor(DV, levels = likert_vars)
+  )
+
+# 2. Quick descriptive means by treatment and gender 
+desc_likert <- data_likert %>%
+  group_by(DV, treatment, dem_gender) %>%
+  summarise(
+    mean_score = mean(score, na.rm = TRUE),
+    sd_score   = sd(score, na.rm = TRUE),
+    n          = sum(!is.na(score)),
+    .groups = "drop"
+  )
+
+print(desc_likert)
+
+# 3. Plot means
+ggplot(desc_likert, aes(x = treatment, y = mean_score, 
+                        color = dem_gender, group = dem_gender)) +
+  geom_point(position = position_dodge(width = 0.2)) +
+  geom_line(position = position_dodge(width = 0.2)) +
+  geom_errorbar(aes(ymin = mean_score - sd_score/sqrt(n),
+                    ymax = mean_score + sd_score/sqrt(n)),
+                width = 0.1, position = position_dodge(width = 0.2)) +
+  facet_wrap(~ DV) +
+  labs(y = "Mean Likert Score", x = "Treatment", color = "Gender") +
+  theme_minimal()
+
+# 4. Fitting LMMs for DVs with gender × treatment 
+lmm_results <- list()
+emm_results <- list()
+
+for (dv in likert_vars) {
+  model <- lmer(
+    score ~ dem_gender * treatment + (1 | ResponseId),
+    data = filter(data_likert, DV == dv)
+    # If you want controls: add + dem_age + dem_xp_overall + ...
+  )
+  
+  lmm_results[[dv]] <- summary(model)
+  
+  emm <- emmeans(model, ~ treatment | dem_gender)
+  emm_results[[dv]] <- emm
+  
+  cat("\n----", toupper(dv), "----\n")
+  print(summary(model))
+  print(contrast(emm, method = "pairwise", adjust = "tukey"))
+}
+
+
+```
+
+#exploratory pt2 attempt to get cleaner output & emmeans 
+
+```{r}
+
+## 1. Prepare Data (Long Format + Controls)
+likert_vars <- c("confidence", "fairness", "negotiability", 
+                 "reliability", "attractiveness", "qualified")
+
+data_likert <- raw_data %>%
+  mutate(
+    ed_status_num = case_when(
+      dem_ed_status == "Other" ~ 1,
+      dem_ed_status == "Bachelor (current)" ~ 2,
+      dem_ed_status == "Bachelor's Degree" ~ 3,
+      dem_ed_status == "Master (current)" ~ 4,
+      dem_ed_status == "Master's Degree" ~ 5,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  pivot_longer(
+    cols = matches("^T[123]_(confidence|fairness|negotiability|reliability|attractiveness|qualified)$"),
+    names_to = c("treatment", "DV"),
+    names_pattern = "T(\\d+)_(.*)",
+    values_to = "score"
+  ) %>%
+  mutate(
+    treatment = factor(treatment, levels = c("1", "2", "3"),
+                       labels = c("T1", "T2", "T3")),
+    DV = factor(DV, levels = likert_vars)
+  )
+
+
+## 2. Descriptive Statistics by Gender & Treatment
+desc_likert <- data_likert %>%
+  group_by(DV, treatment, dem_gender) %>%
+  summarise(
+    mean_score = mean(score, na.rm = TRUE),
+    sd_score = sd(score, na.rm = TRUE),
+    n = sum(!is.na(score)),
+    .groups = "drop"
+  )
+
+desc_likert %>%
+  mutate(mean_score = round(mean_score, 2),
+         sd_score = round(sd_score, 2)) %>%
+  knitr::kable(caption = "Descriptive Likert Statistics by DV, Treatment, and Gender", format = "pandoc")
+
+
+## 3. Visualization by DV (equal y-axes 1–7)
+
+ggplot(desc_likert, aes(x = treatment, y = mean_score, color = dem_gender, group = dem_gender)) +
+  geom_point(position = position_dodge(width = 0.2), size = 2) +
+  geom_line(position = position_dodge(width = 0.2), linewidth = 0.9) +
+  geom_errorbar(aes(ymin = mean_score - sd_score / sqrt(n),
+                    ymax = mean_score + sd_score / sqrt(n)),
+                width = 0.1, position = position_dodge(width = 0.2)) +
+  facet_wrap(~ DV) +
+  scale_y_continuous(limits = c(3, 6), breaks = 1:7) +
+  labs(
+    title = "Mean Likert Scores by Treatment and Gender (T1 = No Info, T2 = Minimum Salary, T3 = Salary Range)",
+    x = "Treatment Condition",
+    y = "Mean Likert Score 1 (Strongly disagree)–7 (Strongly agree)",
+    color = "Gender"
+  ) +
+  theme_minimal(base_size = 12)
+
+## 4. LMM with Controls + Pairwise Contrasts
+likert_models <- list()
+likert_emm <- list()
+likert_contrasts <- list()
+
+for (dv in likert_vars) {
+  model <- lmer(
+    score ~ dem_gender * treatment + dem_age + dem_xp_overall +
+      dem_xp_relevant + dem_gpa_2 + ed_status_num + (1 | ResponseId),
+    data = filter(data_likert, DV == dv)
+  )
+  likert_models[[dv]] <- model
+  likert_emm[[dv]] <- emmeans(model, ~ treatment | dem_gender)
+  likert_contrasts[[dv]] <- contrast(likert_emm[[dv]], method = "pairwise", adjust = "tukey")
+}
+
+## 5. Print Model Summaries
+for (dv in likert_vars) {
+  cat("\n## DV:", toupper(dv), "\n")
+  print(summary(likert_models[[dv]]))
+}
+
+## 6. Pairwise Contrasts (Tukey-adjusted)
+for (dv in likert_vars) {
+  cat(paste0("\n### Pairwise Tukey Contrasts for ", toupper(dv), "\n"))
+  knitr::kable(as.data.frame(likert_contrasts[[dv]]), digits = 3, format = "pandoc")
+
+}
+
+```
+
+
+#
+#emmenas contrasts primary estimate to check if interaction. improves fit
+```{r}
+library(emmeans)
+
+# 1. Ensure treatment ordering if you care about the reference
+data_long$treatment <- factor(data_long$treatment,
+                              levels = c("NoInfo", "MinSalary", "RangeSalary"))
+
+# 2. Cell means
+emm_cells <- emmeans(m_primary, ~ treatment * dem_gender)
+summary(emm_cells)  # inspect to confirm ordering of the 6 cells
+
+# 3. Gender gap within each treatment (Male - Female)
+gap_within <- contrast(emmeans(m_primary, ~ dem_gender | treatment),
+                       method = "pairwise", adjust = "none")  # or adjust="bonferroni" if you want correction
+summary(gap_within, infer = TRUE)
+
+# 4. Difference-in-differences: does the gender gap change across treatments?
+# Example: test whether (Male − Female)_NoInfo  −  (Male − Female)_RangeSalary is ≠ 0
+# Assuming ordering from summary(emm_cells) is:
+#   NoInfo Male, MinSalary Male, RangeSalary Male, NoInfo Female, MinSalary Female, RangeSalary Female
+gap_change <- contrast(emm_cells, method = list(
+  "Gap: NoInfo vs RangeSalary" = c(1, 0, -1,  -1, 0, 1)
+), adjust = "none")  # adjust as needed
+
+summary(gap_change, infer = TRUE)
+
+
+
+library(emmeans)
+
+em <- emmeans(m_primary, ~ dem_gender | treatment)
+pairs(em)
+
+
+mnointeraction <- lmer(
+  estimate ~ dem_gender + treatment +
+    dem_age + dem_xp_overall + dem_xp_relevant +
+    dem_gpa_2 + ed_status_num +
+    (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+minteraction <- lmer(
+  estimate ~ dem_gender * treatment +
+    dem_age + dem_xp_overall + dem_xp_relevant +
+    dem_gpa_2 + ed_status_num +
+    (1 | ResponseId),
+  data = data_long,
+  REML = FALSE
+)
+
+anova(mnointeraction, minteraction)
+#interaction improves fit 
+```
+
+#plot all four interaction plotswith same scale y 
+```{r, interaction plot matrix}
+
+
+# Define treatment label mapping
+label_map <- c("NoInfo" = "T1", "MinSalary" = "T2", "RangeSalary" = "T3")
+
+# Plot 1: Ask ~ treatment * gender (Baseline)
+pp1 <- emmip(m1_ask, dem_gender ~ treatment, CIs = TRUE, ylab = "Ask (Baseline)") +
+  scale_x_discrete(labels = label_map) +
+  ylim(3000, 4500) +
+  ggtitle("Ask (Baseline)")
+
+# Plot 2: Ask ~ treatment * gender (Controls)
+pp2 <- emmip(m_primary_ask, dem_gender ~ treatment, CIs = TRUE, ylab = "Ask (Controls)") +
+  scale_x_discrete(labels = label_map) +
+  ylim(3000, 4500) +
+  ggtitle("Ask (Controls)")
+
+# Plot 3: Estimate ~ treatment * gender (Baseline)
+pp3 <- emmip(m1, dem_gender ~ treatment, CIs = TRUE, ylab = "Estimate (Baseline)") +
+  scale_x_discrete(labels = label_map) +
+  ylim(3000, 4500) +
+  ggtitle("Estimate (Baseline)")
+
+# Plot 4: Estimate ~ treatment * gender (Controls)
+pp4 <- emmip(m_primary, dem_gender ~ treatment, CIs = TRUE, ylab = "Estimate (Controls)") +
+  scale_x_discrete(labels = label_map) +
+  ylim(3000, 4500) +
+  ggtitle("Estimate (Controls)")
+grid.arrange(pp1, pp2, pp3, pp4, ncol = 2)
+
+```
+# global effects of treatmeents by averaging over gender by weight 
+
+```{r,averaged out weighted by gendr }
+
+# Define your actual sample weights
+gendersample_weights <- c(Male = 55, Female = 42)
+
+# Compute emmeans: global means across treatments (weighted)
+emm_est <- emmeans(m_primary, ~ treatment, weights = gendersample_weights)
+emm_ask <- emmeans(m_primary_ask, ~ treatment, weights = gendersample_weights)
+
+# Convert to data frames and tag with outcome type
+df_est <- as.data.frame(emm_est) %>% mutate(type = "Estimate")
+df_ask <- as.data.frame(emm_ask) %>% mutate(type = "Ask")
+
+# Combine both into one df
+df_both <- bind_rows(df_est, df_ask)
+
+# Optional: map treatment names to short labels
+label_map <- c("NoInfo" = "T1", "MinSalary" = "T2", "RangeSalary" = "T3")
+df_both$treatment <- factor(df_both$treatment, levels = names(label_map), labels = label_map)
+
+# Plot
+ggplot(df_both, aes(x = treatment, y = emmean, group = type, color = type, fill = type)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.2, color = NA) +
+  scale_color_manual(values = c("Estimate" = "#0072B2", "Ask" = "#D55E00")) +
+  scale_fill_manual(values = c("Estimate" = "#0072B2", "Ask" = "#D55E00")) +
+  ylim(3000, 4500) +
+  labs(
+    title = "Global Estimated Marginal Means (Weighted by Sample: 55 Men, 42 Women)",
+    x = "Treatment Condition",
+    y = "€ per Month",
+    color = "",
+    fill = ""
+  ) +
+  theme_minimal(base_size = 13)
+ 
+```
+emmeans numeric check 
+```{r}
+# Estimate: global contrasts across treatments
+emm_est_my <- emmeans(m_primary, ~ treatment, weights = c(Male = 55, Female = 42))
+contrast(emm_est_my, method = "pairwise", adjust = "none")
+
+# Ask: global contrasts across treatments
+emm_ask_my <- emmeans(m_primary_ask, ~ treatment, weights = c(Male = 55, Female = 42))
+contrast(emm_ask_my, method = "pairwise", adjust = "none")
+
+summary(emm_estimate_global, infer = TRUE)
+summary(emm_ask_global, infer = TRUE)
+
+```

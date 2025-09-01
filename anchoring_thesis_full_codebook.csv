@@ -1,0 +1,28 @@
+Variable,Label,Coding,Notes
+T1_estimate,"Expected monthly gross salary, T1 No Disclosure",Numeric (€),
+T1_ask,"Asked monthly gross salary, T1 No Disclosure",Numeric (€),
+T2_estimate,"Expected monthly gross salary, T2 Minimum Disclosure",Numeric (€),
+T2_ask,"Asked monthly gross salary, T2 Minimum Disclosure",Numeric (€),
+T3_estimate,"Expected monthly gross salary, T3 Range Disclosure",Numeric (€),
+T3_ask,"Asked monthly gross salary, T3 Range Disclosure",Numeric (€),
+Tx_confidence,Confidence in estimate,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_fairness,Perceived fairness of salary,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_negotiability,Salary is negotiable,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_reliability,Salary info reliability,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_attractiveness,Attractiveness of role,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_qualified,Self-assessed qualification,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+Tx_perception_eval,Perception evaluation block,Likert block,"Includes fairness, negotiability, etc."
+dem_study,Field of study,"1=Econ/Business, 2=Other",
+dem_gender,Gender,"0=Male, 1=Female",Recoded to factor
+dem_age,Age,Years,
+dem_residence,Country of residence,10=Austria; 17=Belgium; 45=Czech Republic; 61=France; 65=Germany; 84=Italy; 122=Netherlands; 137=Poland; 157=Slovakia; 184=UAE; 185=UK; 187=USA,Recoded from codes
+dem_livinginaustria,Years living in Austria,Numeric (years),
+dem_enrolled_grad,Enrolled/graduated last 3 years,"0=No, 1=Yes",
+dem_ed_status,Education status,"1=Bachelor current, 2=Bachelor degree, 3=Master current, 4=Master degree, 5=Other",Ordered
+dem_gpa_2,GPA (inverted),1=Excellent … 5=Fail,Inverted from Austrian GPA
+dem_xp_overall,Overall work experience,Years,
+dem_xp_relevant,Relevant work experience,Years,
+dem_job_status,Employment status,"1=Employed, 2=Maternity leave, 3=Job seeking, 4=Study",
+dem_attitude_drive,Career drive,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+dem_attitude_negskills,Negotiation skill confidence,"1=Strongly disagree, 2=Disagree, 3=Somewhat disagree, 4=Neither agree nor disagree, 5=Somewhat agree, 6=Agree, 7=Strongly agree",
+dem_infosources,Salary info sources (multi-choice),"1=Family/Partner, 2=Acquaintances, 3=Chamber of labor, 4=Trade Union, 5=Public Employment Service (AMS), 6=Collective agreements, 7=Job ads, 8=Online job portals, 9=Other",Multiple selection allowed
